@@ -6,7 +6,8 @@ plugins {
 
 android {
     namespace = "com.kingpoem.njupt_flutter"
-    compileSdk = flutter.compileSdkVersion
+    // flutter_secure_storage 11 要求 compileSdk >= 37
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

@@ -3,36 +3,48 @@ import 'package:flutter/material.dart';
 import 'package:njupt_flutter/src/rust/api/jwxt.dart';
 import 'package:njupt_flutter/util/cached.dart';
 
-class CacheBanner extends StatelessWidget {
-  const CacheBanner({super.key, required this.fromCache, this.onForceRefresh});
+/// 当前页注册的「强制刷新」回调，供顶栏刷新按钮调用。
+class PageRefresh extends ChangeNotifier {
+  Future<void> Function()? _handler;
 
-  final bool? fromCache;
-  final VoidCallback? onForceRefresh;
+  bool get available => _handler != null;
 
-  @override
-  Widget build(BuildContext context) {
-    if (fromCache == null) return const SizedBox.shrink();
-    final cached = fromCache!;
-    return Material(
-      color: cached
-          ? Theme.of(context).colorScheme.secondaryContainer
-          : Theme.of(context).colorScheme.primaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        child: Row(
-          children: [
-            Icon(cached ? Icons.history : Icons.cloud_done_outlined, size: 18),
-            const SizedBox(width: 8),
-            Expanded(child: Text(cached ? '来自内存缓存' : '网络已刷新')),
-            if (onForceRefresh != null)
-              TextButton(
-                onPressed: onForceRefresh,
-                child: const Text('强制刷新'),
-              ),
-          ],
-        ),
-      ),
-    );
+  void bind(Future<void> Function() handler) {
+    if (_handler == handler) return;
+    _handler = handler;
+    notifyListeners();
+  }
+
+  void unbind(Future<void> Function() handler) {
+    if (_handler != handler) return;
+    _handler = null;
+    notifyListeners();
+  }
+
+  Future<void> refresh() async {
+    final handler = _handler;
+    if (handler != null) await handler();
+  }
+}
+
+class PageRefreshScope extends InheritedNotifier<PageRefresh> {
+  const PageRefreshScope({
+    super.key,
+    required PageRefresh controller,
+    required super.child,
+  }) : super(notifier: controller);
+
+  static PageRefresh of(BuildContext context) {
+    final scope =
+        context.dependOnInheritedWidgetOfExactType<PageRefreshScope>();
+    assert(scope != null, 'PageRefreshScope not found');
+    return scope!.notifier!;
+  }
+
+  static PageRefresh? maybeOf(BuildContext context) {
+    return context
+        .dependOnInheritedWidgetOfExactType<PageRefreshScope>()
+        ?.notifier;
   }
 }
 
@@ -120,11 +132,31 @@ class _CachedQueryPageState extends State<CachedQueryPage> {
   bool _loading = true;
   String? _error;
   CachedPayload? _payload;
+  PageRefresh? _refresh;
+
+  Future<void> _forceRefresh() => _load(BridgeFetchMode.networkOnly);
 
   @override
   void initState() {
     super.initState();
     _load(BridgeFetchMode.cacheFirst);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final refresh = PageRefreshScope.maybeOf(context);
+    if (!identical(refresh, _refresh)) {
+      _refresh?.unbind(_forceRefresh);
+      _refresh = refresh;
+    }
+    _refresh?.bind(_forceRefresh);
+  }
+
+  @override
+  void dispose() {
+    _refresh?.unbind(_forceRefresh);
+    super.dispose();
   }
 
   Future<void> _load(BridgeFetchMode mode) async {
@@ -153,10 +185,6 @@ class _CachedQueryPageState extends State<CachedQueryPage> {
     return Column(
       children: [
         if (widget.header != null) widget.header!,
-        CacheBanner(
-          fromCache: _payload?.fromCache,
-          onForceRefresh: () => _load(BridgeFetchMode.networkOnly),
-        ),
         Expanded(
           child: RefreshIndicator(
             onRefresh: () => _load(BridgeFetchMode.networkOnly),

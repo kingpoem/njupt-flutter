@@ -6,6 +6,7 @@ import 'package:njupt_flutter/session.dart';
 import 'package:njupt_flutter/src/rust/api/card.dart';
 import 'package:njupt_flutter/src/rust/api/jwxt.dart';
 import 'package:njupt_flutter/widgets/common.dart';
+import 'package:njupt_flutter/widgets/timetable_view.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key, required this.session});
@@ -19,22 +20,66 @@ class LoginPage extends StatefulWidget {
 class _LoginPageState extends State<LoginPage> {
   late final TextEditingController _user;
   late final TextEditingController _pass;
+  late final FocusNode _passFocus;
   late bool _offCampus;
   bool _obscure = true;
+  bool _showSavedPassword = false;
+  String? _savedPassword;
 
   @override
   void initState() {
     super.initState();
     _user = TextEditingController(text: widget.session.username ?? '');
     _pass = TextEditingController();
+    _passFocus = FocusNode()..addListener(_onPassFocus);
     _offCampus = widget.session.offCampus;
+    _user.addListener(_refreshSavedPassword);
+    _refreshSavedPassword();
   }
 
   @override
   void dispose() {
+    _passFocus.removeListener(_onPassFocus);
+    _passFocus.dispose();
+    _user.removeListener(_refreshSavedPassword);
     _user.dispose();
     _pass.dispose();
     super.dispose();
+  }
+
+  void _refreshSavedPassword() {
+    final saved = widget.session.credentials.passwordFor(_user.text);
+    if (saved != _savedPassword) {
+      setState(() => _savedPassword = saved);
+    }
+  }
+
+  void _onPassFocus() {
+    final show = _passFocus.hasFocus &&
+        _savedPassword != null &&
+        _pass.text != _savedPassword;
+    if (show != _showSavedPassword) {
+      setState(() => _showSavedPassword = show);
+    }
+  }
+
+  void _useSavedPassword() {
+    final saved = widget.session.credentials.passwordFor(_user.text);
+    if (saved == null || saved.isEmpty) {
+      setState(() {
+        _savedPassword = null;
+        _showSavedPassword = false;
+      });
+      return;
+    }
+    setState(() {
+      _savedPassword = saved;
+      _pass.value = TextEditingValue(
+        text: saved,
+        selection: TextSelection.collapsed(offset: saved.length),
+      );
+      _showSavedPassword = false;
+    });
   }
 
   Future<void> _submit() async {
@@ -75,22 +120,78 @@ class _LoginPageState extends State<LoginPage> {
                 ),
                 textInputAction: TextInputAction.next,
                 autofillHints: const [AutofillHints.username],
+                onChanged: (_) => _refreshSavedPassword(),
               ),
               const SizedBox(height: 12),
               TextField(
                 controller: _pass,
+                focusNode: _passFocus,
                 obscureText: _obscure,
                 decoration: InputDecoration(
                   labelText: '密码',
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
                     onPressed: () => setState(() => _obscure = !_obscure),
-                    icon: Icon(_obscure ? Icons.visibility : Icons.visibility_off),
+                    icon: Icon(
+                      _obscure ? Icons.visibility : Icons.visibility_off,
+                    ),
                   ),
                 ),
+                onTap: () {
+                  // 点击时若有缓存密码则展开选项
+                  final saved = widget.session.credentials.passwordFor(
+                    _user.text,
+                  );
+                  setState(() {
+                    _savedPassword = saved;
+                    _showSavedPassword =
+                        saved != null && _pass.text != saved;
+                  });
+                },
+                onChanged: (_) {
+                  if (_showSavedPassword &&
+                      _savedPassword != null &&
+                      _pass.text == _savedPassword) {
+                    setState(() => _showSavedPassword = false);
+                  }
+                },
                 onSubmitted: (_) => _submit(),
                 autofillHints: const [AutofillHints.password],
               ),
+              if (_showSavedPassword && _savedPassword != null) ...[
+                const SizedBox(height: 8),
+                Material(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: _useSavedPassword,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.lock_outline,
+                            size: 18,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              '使用已保存的密码（${_mask(_savedPassword!)}）',
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
+                          ),
+                          const Icon(Icons.chevron_right, size: 18),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(height: 8),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
@@ -116,6 +217,11 @@ class _LoginPageState extends State<LoginPage> {
       ),
     );
   }
+
+  String _mask(String password) {
+    if (password.length <= 2) return '••';
+    return '${password[0]}${'•' * (password.length - 2).clamp(2, 8)}${password[password.length - 1]}';
+  }
 }
 
 class HomeShell extends StatefulWidget {
@@ -129,6 +235,7 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
+  final _refresh = PageRefresh();
 
   static const _destinations = [
     (Icons.calendar_month, '课表'),
@@ -144,9 +251,33 @@ class _HomeShellState extends State<HomeShell> {
   ];
 
   @override
+  void dispose() {
+    _refresh.dispose();
+    super.dispose();
+  }
+
+  List<Widget> _refreshAction() {
+    return [
+      ListenableBuilder(
+        listenable: _refresh,
+        builder: (context, _) {
+          return IconButton(
+            tooltip: '刷新',
+            onPressed: _refresh.available ? () => _refresh.refresh() : null,
+            icon: const Icon(Icons.refresh),
+          );
+        },
+      ),
+    ];
+  }
+
+  @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 900;
-    final body = _pageAt(_index);
+    final body = PageRefreshScope(
+      controller: _refresh,
+      child: _pageAt(_index),
+    );
     if (wide) {
       return Scaffold(
         body: Row(
@@ -174,7 +305,32 @@ class _HomeShellState extends State<HomeShell> {
               ),
             ),
             const VerticalDivider(width: 1),
-            Expanded(child: body),
+            Expanded(
+              child: Column(
+                children: [
+                  Material(
+                    elevation: 0,
+                    child: SizedBox(
+                      height: kToolbarHeight,
+                      child: Row(
+                        children: [
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Text(
+                              _destinations[_index].$2,
+                              style: Theme.of(context).textTheme.titleLarge,
+                            ),
+                          ),
+                          ..._refreshAction(),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  Expanded(child: body),
+                ],
+              ),
+            ),
           ],
         ),
       );
@@ -183,6 +339,7 @@ class _HomeShellState extends State<HomeShell> {
       appBar: AppBar(
         title: Text(_destinations[_index].$2),
         actions: [
+          ..._refreshAction(),
           IconButton(
             tooltip: '退出登录',
             onPressed: () => widget.session.logout(),
@@ -266,36 +423,12 @@ class _SchedulePage extends StatelessWidget {
         final courses = (map['courses'] as List?) ?? const [];
         final practices = (map['practices'] as List?) ?? const [];
         final student = map['student'] as Map<String, dynamic>?;
-        return ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.all(12),
-          children: [
-            if (student != null)
-              ListTile(
-                title: Text('${student['name']} · ${student['student_id']}'),
-                subtitle: Text('${student['major']} · ${student['class_name']}'),
-              ),
-            const Divider(),
-            for (final c in courses)
-              ListTile(
-                title: Text('${c['name']}'),
-                subtitle: Text(
-                  '${c['weekday_name']} ${c['sections']} · ${c['room']}\n'
-                  '${c['teacher']} · ${c['weeks']}',
-                ),
-                isThreeLine: true,
-              ),
-            if (practices.isNotEmpty) ...[
-              const Divider(),
-              const ListTile(title: Text('实践课')),
-              for (final p in practices)
-                ListTile(
-                  title: Text('${p['name']}'),
-                  subtitle: Text('${p['teacher']} · ${p['weeks']}\n${p['detail']}'),
-                  isThreeLine: true,
-                ),
-            ],
-          ],
+        return TimetableView(
+          courses: courses,
+          practices: practices,
+          year: session.year,
+          term: session.term,
+          student: student,
         );
       },
     );

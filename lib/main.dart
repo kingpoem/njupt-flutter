@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'package:njupt_flutter/screens/home.dart';
@@ -10,6 +12,7 @@ Future<void> main() async {
   final session = SessionController();
   await session.loadPrefs();
   runApp(NjuptApp(session: session));
+  unawaited(session.tryRestoreSession());
 }
 
 class NjuptApp extends StatelessWidget {
@@ -28,6 +31,11 @@ class NjuptApp extends StatelessWidget {
       home: ListenableBuilder(
         listenable: session,
         builder: (context, _) {
+          if (session.restoring) {
+            return const Scaffold(
+              body: Center(child: CircularProgressIndicator()),
+            );
+          }
           if (!session.isLoggedIn) {
             return LoginPage(session: session);
           }
