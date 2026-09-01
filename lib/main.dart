@@ -31,15 +31,10 @@ class NjuptApp extends StatelessWidget {
       home: ListenableBuilder(
         listenable: session,
         builder: (context, _) {
-          if (session.restoring) {
-            return const Scaffold(
-              body: Center(child: CircularProgressIndicator()),
-            );
+          if (session.showHome) {
+            return HomeShell(session: session);
           }
-          if (!session.isLoggedIn) {
-            return LoginPage(session: session);
-          }
-          return HomeShell(session: session);
+          return LoginPage(session: session);
         },
       ),
     );

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'package:njupt_flutter/session.dart';
 import 'package:njupt_flutter/src/rust/api/jwxt.dart';
 import 'package:njupt_flutter/util/cached.dart';
 
@@ -116,6 +117,8 @@ class CachedQueryPage extends StatefulWidget {
     required this.title,
     required this.fetcher,
     required this.builder,
+    required this.session,
+    required this.diskKey,
     this.header,
   });
 
@@ -123,6 +126,8 @@ class CachedQueryPage extends StatefulWidget {
   final CachedFetcher fetcher;
   final Widget Function(BuildContext context, dynamic data) builder;
   final Widget? header;
+  final SessionController session;
+  final String diskKey;
 
   @override
   State<CachedQueryPage> createState() => _CachedQueryPageState();
@@ -134,12 +139,21 @@ class _CachedQueryPageState extends State<CachedQueryPage> {
   CachedPayload? _payload;
   PageRefresh? _refresh;
 
-  Future<void> _forceRefresh() => _load(BridgeFetchMode.networkOnly);
+  Future<void> _forceRefresh() => _loadNetwork(BridgeFetchMode.networkOnly);
 
   @override
   void initState() {
     super.initState();
-    _load(BridgeFetchMode.cacheFirst);
+    _bootstrap();
+  }
+
+  @override
+  void didUpdateWidget(covariant CachedQueryPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.diskKey != widget.diskKey ||
+        oldWidget.session.username != widget.session.username) {
+      _bootstrap();
+    }
   }
 
   @override
@@ -159,13 +173,68 @@ class _CachedQueryPageState extends State<CachedQueryPage> {
     super.dispose();
   }
 
-  Future<void> _load(BridgeFetchMode mode) async {
+  Future<void> _bootstrap() async {
     setState(() {
       _loading = true;
       _error = null;
     });
+
+    final user = widget.session.username?.trim() ?? '';
+    if (user.isNotEmpty) {
+      final disk = await widget.session.diskCache.readEnvelope(user, widget.diskKey);
+      if (!mounted) return;
+      if (disk != null) {
+        setState(() {
+          _payload = CachedPayload.parse(disk);
+          _loading = widget.session.jwxt == null;
+        });
+      }
+    }
+
+    await widget.session.whenOnline;
+    if (!mounted) return;
+
+    if (widget.session.jwxt == null) {
+      setState(() {
+        _loading = false;
+        if (_payload == null) {
+          _error = widget.session.lastError ?? '未登录，且无本地缓存';
+        }
+      });
+      return;
+    }
+
+    await _loadNetwork(
+      _payload != null ? BridgeFetchMode.cacheFirst : BridgeFetchMode.cacheFirst,
+    );
+  }
+
+  Future<void> _loadNetwork(BridgeFetchMode mode) async {
+    if (widget.session.jwxt == null) {
+      await widget.session.whenOnline;
+      if (widget.session.jwxt == null) {
+        if (mounted) {
+          setState(() {
+            _loading = false;
+            _error ??= widget.session.lastError ?? '未登录';
+          });
+        }
+        return;
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
     try {
       final raw = await widget.fetcher(mode);
+      final user = widget.session.username?.trim() ?? '';
+      if (user.isNotEmpty) {
+        await widget.session.diskCache.writeEnvelope(user, widget.diskKey, raw);
+      }
       if (!mounted) return;
       setState(() {
         _payload = CachedPayload.parse(raw);
@@ -184,10 +253,29 @@ class _CachedQueryPageState extends State<CachedQueryPage> {
   Widget build(BuildContext context) {
     return Column(
       children: [
+        if (widget.session.signingIn ||
+            (widget.session.jwxt == null && _payload != null))
+          Material(
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(child: Text('正在后台登录，先显示本地缓存…')),
+                ],
+              ),
+            ),
+          ),
         if (widget.header != null) widget.header!,
         Expanded(
           child: RefreshIndicator(
-            onRefresh: () => _load(BridgeFetchMode.networkOnly),
+            onRefresh: () => _loadNetwork(BridgeFetchMode.networkOnly),
             child: _buildBody(),
           ),
         ),
@@ -213,7 +301,7 @@ class _CachedQueryPageState extends State<CachedQueryPage> {
           Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
           const SizedBox(height: 12),
           FilledButton(
-            onPressed: () => _load(BridgeFetchMode.networkOnly),
+            onPressed: () => _loadNetwork(BridgeFetchMode.networkOnly),
             child: const Text('重试'),
           ),
         ],

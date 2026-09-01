@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:njupt_flutter/session.dart';
 import 'package:njupt_flutter/src/rust/api/card.dart';
 import 'package:njupt_flutter/src/rust/api/jwxt.dart';
+import 'package:njupt_flutter/util/gpa.dart';
 import 'package:njupt_flutter/widgets/common.dart';
 import 'package:njupt_flutter/widgets/timetable_view.dart';
 
@@ -240,12 +241,10 @@ class _HomeShellState extends State<HomeShell> {
   static const _destinations = [
     (Icons.calendar_month, '课表'),
     (Icons.grade, '成绩'),
-    (Icons.analytics_outlined, '分项'),
     (Icons.event, '考试'),
     (Icons.replay, '补考'),
     (Icons.schedule_send, '缓考'),
     (Icons.checklist, '已选'),
-    (Icons.person, '学籍'),
     (Icons.credit_card, '校园卡'),
     (Icons.search, '选课浏览'),
   ];
@@ -274,9 +273,14 @@ class _HomeShellState extends State<HomeShell> {
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 900;
-    final body = PageRefreshScope(
-      controller: _refresh,
-      child: _pageAt(_index),
+    final body = ListenableBuilder(
+      listenable: widget.session,
+      builder: (context, _) {
+        return PageRefreshScope(
+          controller: _refresh,
+          child: _pageAt(_index),
+        );
+      },
     );
     if (wide) {
       return Scaffold(
@@ -386,13 +390,11 @@ class _HomeShellState extends State<HomeShell> {
     return switch (i) {
       0 => _SchedulePage(session: s),
       1 => _GradesPage(session: s),
-      2 => _GradeDetailsPage(session: s),
-      3 => _ExamsPage(session: s, kind: _ExamKind.normal),
-      4 => _ExamsPage(session: s, kind: _ExamKind.makeup),
-      5 => _ExamsPage(session: s, kind: _ExamKind.deferred),
-      6 => _SelectedPage(session: s),
-      7 => _ProfilePage(session: s),
-      8 => _CardPage(session: s),
+      2 => _ExamsPage(session: s, kind: _ExamKind.normal),
+      3 => _ExamsPage(session: s, kind: _ExamKind.makeup),
+      4 => _ExamsPage(session: s, kind: _ExamKind.deferred),
+      5 => _SelectedPage(session: s),
+      6 => _CardPage(session: s),
       _ => _CourseSelectPage(session: s),
     };
   }
@@ -407,6 +409,8 @@ class _SchedulePage extends StatelessWidget {
     return CachedQueryPage(
       key: ValueKey('schedule-${session.year}-${session.term}'),
       title: '课表',
+      session: session,
+      diskKey: SessionController.scheduleKey(session.year, session.term),
       header: YearTermControls(
         year: session.year,
         term: session.term,
@@ -449,9 +453,12 @@ class _GradesPageState extends State<_GradesPage> {
   @override
   Widget build(BuildContext context) {
     final s = widget.session;
+    // 始终拉全量成绩；「全部」算总绩点，指定学期则过滤后算单学期绩点
     return CachedQueryPage(
-      key: ValueKey('grades-$_all-${s.year}-${s.term}'),
+      key: const ValueKey('grades-all'),
       title: '成绩',
+      session: s,
+      diskKey: SessionController.gradesKey(null, null),
       header: YearTermControls(
         year: s.year,
         term: s.term,
@@ -461,28 +468,48 @@ class _GradesPageState extends State<_GradesPage> {
       ),
       fetcher: (mode) => fetchGrades(
         jwxt: s.jwxt!,
-        year: _all ? null : s.year,
-        term: _all ? null : s.term,
+        year: null,
+        term: null,
         mode: mode,
       ),
       builder: (context, data) {
-        final items = ((data as Map)['items'] as List?) ?? const [];
+        final allItems = ((data as Map)['items'] as List?) ?? const [];
+        final termItems = allItems
+            .whereType<Map>()
+            .where((g) => gradeMatchesTerm(g, s.year, s.term))
+            .toList();
+        final shown = _all ? allItems : termItems;
+        final gpa = computeGpa(shown);
+
         return ListView.separated(
           physics: const AlwaysScrollableScrollPhysics(),
-          itemCount: items.length,
+          itemCount: shown.length + 1,
           separatorBuilder: (_, _) => const Divider(height: 1),
           itemBuilder: (context, i) {
-            final g = items[i] as Map;
+            if (i == 0) {
+              return _GpaHeader(
+                gpa: gpa.gpa,
+                credits: gpa.credits,
+                subtitle: _all
+                    ? '全部成绩'
+                    : '${s.year}-${s.term == BridgeTerm.second ? '第二学期' : '第一学期'}',
+              );
+            }
+            final g = shown[i - 1] as Map;
             return ListTile(
               title: Text('${g['name']}'),
               subtitle: Text(
-                '${g['academic_year']} ${g['term_name']} · ${g['course_nature']}',
+                '${g['academic_year']} ${g['term_name']} · '
+                '${g['course_nature']} · ${g['credit']}学分',
               ),
               trailing: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Text('${g['score']}', style: Theme.of(context).textTheme.titleMedium),
+                  Text(
+                    '${g['score']}',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                   Text('绩点 ${g['grade_point'] ?? '-'}'),
                 ],
               ),
@@ -494,52 +521,32 @@ class _GradesPageState extends State<_GradesPage> {
   }
 }
 
-class _GradeDetailsPage extends StatefulWidget {
-  const _GradeDetailsPage({required this.session});
-  final SessionController session;
+class _GpaHeader extends StatelessWidget {
+  const _GpaHeader({
+    required this.gpa,
+    required this.credits,
+    required this.subtitle,
+  });
 
-  @override
-  State<_GradeDetailsPage> createState() => _GradeDetailsPageState();
-}
-
-class _GradeDetailsPageState extends State<_GradeDetailsPage> {
-  bool _all = true;
+  final double? gpa;
+  final double credits;
+  final String subtitle;
 
   @override
   Widget build(BuildContext context) {
-    final s = widget.session;
-    return CachedQueryPage(
-      key: ValueKey('grade-details-$_all-${s.year}-${s.term}'),
-      title: '成绩分项',
-      header: YearTermControls(
-        year: s.year,
-        term: s.term,
-        allYears: _all,
-        onAllYearsChanged: (v) => setState(() => _all = v),
-        onChanged: (y, t) => s.setPeriod(year: y, term: t),
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surfaceContainerHighest,
+      child: ListTile(
+        title: const Text('绩点'),
+        subtitle: Text(
+          '$subtitle · 计 ${credits.toStringAsFixed(1)} 学分',
+        ),
+        trailing: Text(
+          gpa == null ? '-' : gpa!.toStringAsFixed(2),
+          style: Theme.of(context).textTheme.headlineSmall,
+        ),
       ),
-      fetcher: (mode) => fetchGradeDetails(
-        jwxt: s.jwxt!,
-        year: _all ? null : s.year,
-        term: _all ? null : s.term,
-        mode: mode,
-      ),
-      builder: (context, data) {
-        final items = ((data as Map)['items'] as List?) ?? const [];
-        return ListView.separated(
-          physics: const AlwaysScrollableScrollPhysics(),
-          itemCount: items.length,
-          separatorBuilder: (_, _) => const Divider(height: 1),
-          itemBuilder: (context, i) {
-            final g = items[i] as Map;
-            return ListTile(
-              title: Text('${g['name']} · ${g['component']}'),
-              subtitle: Text('${g['academic_year']} ${g['term_name']}'),
-              trailing: Text('${g['score']}'),
-            );
-          },
-        );
-      },
     );
   }
 }
@@ -564,6 +571,12 @@ class _ExamsPageState extends State<_ExamsPage> {
     return CachedQueryPage(
       key: ValueKey('exams-${widget.kind}-$_all-${s.year}-${s.term}'),
       title: '考试',
+      session: s,
+      diskKey: SessionController.examsKey(
+        widget.kind.name,
+        _all ? null : s.year,
+        _all ? null : s.term,
+      ),
       header: YearTermControls(
         year: s.year,
         term: s.term,
@@ -635,6 +648,11 @@ class _SelectedPageState extends State<_SelectedPage> {
     return CachedQueryPage(
       key: ValueKey('selected-$_all-${s.year}-${s.term}'),
       title: '已选课程',
+      session: s,
+      diskKey: SessionController.selectedKey(
+        _all ? null : s.year,
+        _all ? null : s.term,
+      ),
       header: YearTermControls(
         year: s.year,
         term: s.term,
@@ -671,90 +689,6 @@ class _SelectedPageState extends State<_SelectedPage> {
   }
 }
 
-class _ProfilePage extends StatelessWidget {
-  const _ProfilePage({required this.session});
-  final SessionController session;
-
-  @override
-  Widget build(BuildContext context) {
-    return CachedQueryPage(
-      title: '学籍',
-      fetcher: (mode) => fetchProfile(jwxt: session.jwxt!, mode: mode),
-      builder: (context, data) {
-        final p = data as Map<String, dynamic>;
-        final entries = [
-          ('学号', p['student_id']),
-          ('姓名', p['name']),
-          ('性别', p['gender']),
-          ('年级', p['grade_year']),
-          ('学院', p['college']),
-          ('专业', p['major']),
-          ('班级', p['class_name']),
-          ('学制', p['study_years']),
-          ('学籍状态', p['status']),
-          ('是否在校', p['in_school']),
-          ('入学日期', p['enrollment_date']),
-          ('培养层次', p['education_level']),
-          ('邮箱', p['email']),
-          ('电话', p['phone']),
-        ];
-        return ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          children: [
-            for (final e in entries)
-              ListTile(title: Text(e.$1), subtitle: Text('${e.$2 ?? ''}')),
-            ListTile(
-              title: const Text('全部字段'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () async {
-                final raw = await fetchProfileFields(
-                  jwxt: session.jwxt!,
-                  mode: BridgeFetchMode.cacheFirst,
-                );
-                final payload = jsonDecode(raw) as Map<String, dynamic>;
-                final fields = (payload['data'] as Map).cast<String, dynamic>();
-                if (!context.mounted) return;
-                await Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => Scaffold(
-                      appBar: AppBar(title: const Text('学籍全部字段')),
-                      body: ListView(
-                        children: [
-                          for (final e in fields.entries)
-                            ListTile(
-                              title: Text(e.key),
-                              subtitle: Text('${e.value}'),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
-            ListTile(
-              title: const Text('清空教务缓存'),
-              subtitle: FutureBuilder(
-                future: jwxtCacheLen(jwxt: session.jwxt!),
-                builder: (context, snap) =>
-                    Text('当前条目：${snap.data ?? '...'}'),
-              ),
-              onTap: () async {
-                await clearJwxtCache(jwxt: session.jwxt!);
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('教务缓存已清空')),
-                  );
-                }
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
-
 class _CardPage extends StatelessWidget {
   const _CardPage({required this.session});
   final SessionController session;
@@ -763,6 +697,8 @@ class _CardPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return CachedQueryPage(
       title: '校园卡',
+      session: session,
+      diskKey: SessionController.cardBalanceKey,
       fetcher: (mode) =>
           fetchCardBalance(card: session.card!, mode: mode),
       builder: (context, data) {
@@ -777,18 +713,20 @@ class _CardPage extends StatelessWidget {
               '${b['display'] ?? '${b['amount']}元'}',
               style: Theme.of(context).textTheme.displaySmall,
             ),
-            const SizedBox(height: 24),
-            FilledButton.tonal(
-              onPressed: () async {
-                await clearCardCache(card: session.card!);
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('校园卡缓存已清空，请下拉刷新')),
-                  );
-                }
-              },
-              child: const Text('清空余额缓存'),
-            ),
+            if (session.card != null) ...[
+              const SizedBox(height: 24),
+              FilledButton.tonal(
+                onPressed: () async {
+                  await clearCardCache(card: session.card!);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('校园卡内存缓存已清空，请下拉刷新')),
+                    );
+                  }
+                },
+                child: const Text('清空余额内存缓存'),
+              ),
+            ],
           ],
         );
       },
